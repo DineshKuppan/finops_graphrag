@@ -1,0 +1,2 @@
+from src.interfaces.graph_storage import IGraphStorage
+from src.interfaces.llm_extractor import ILlmExtractor
