@@ -1,0 +1,69 @@
+[
+  {
+    "id": "admin-full-access",
+    "description": "Admins can view and approve any invoice.",
+    "effect": "permit",
+    "actions": ["view_invoice", "approve_invoice"],
+    "conditions": [
+      { "attr": "user.roles", "op": "contains", "value": "admin" }
+    ]
+  },
+  {
+    "id": "auditor-read-only",
+    "description": "Auditors can view any invoice, but never approve one.",
+    "effect": "permit",
+    "actions": ["view_invoice"],
+    "conditions": [
+      { "attr": "user.roles", "op": "contains", "value": "auditor" }
+    ]
+  },
+  {
+    "id": "same-department-view",
+    "description": "Anyone can view invoices belonging to their own department.",
+    "effect": "permit",
+    "actions": ["view_invoice"],
+    "conditions": [
+      { "attr": "user.department", "op": "eq", "value_ref": "resource.department" }
+    ]
+  },
+  {
+    "id": "clearance-and-region-view",
+    "description": "Sufficient clearance plus a matching region also grants view access.",
+    "effect": "permit",
+    "actions": ["view_invoice"],
+    "conditions": [
+      { "attr": "user.clearance_level", "op": "gte", "value_ref": "resource.classification_level" },
+      { "attr": "user.region", "op": "eq", "value_ref": "resource.region" }
+    ]
+  },
+  {
+    "id": "finance-manager-department-approval",
+    "description": "Finance managers may approve their own department's invoices up to $100,000.",
+    "effect": "permit",
+    "actions": ["approve_invoice"],
+    "conditions": [
+      { "attr": "user.roles", "op": "contains", "value": "finance_manager" },
+      { "attr": "user.department", "op": "eq", "value_ref": "resource.department" },
+      { "attr": "resource.amount", "op": "lte", "value": 100000 }
+    ]
+  },
+  {
+    "id": "deny-restricted-without-top-clearance",
+    "description": "Restricted invoices require clearance level 5, no matter what any other policy permits.",
+    "effect": "deny",
+    "actions": ["view_invoice", "approve_invoice"],
+    "conditions": [
+      { "attr": "resource.classification", "op": "eq", "value": "restricted" },
+      { "attr": "user.clearance_level", "op": "lt", "value": 5 }
+    ]
+  },
+  {
+    "id": "deny-after-hours-approval",
+    "description": "Approvals are blocked outside business hours, regardless of role or attributes (context-aware control unique to PBAC).",
+    "effect": "deny",
+    "actions": ["approve_invoice"],
+    "conditions": [
+      { "attr": "environment.business_hours", "op": "eq", "value": false }
+    ]
+  }
+]
