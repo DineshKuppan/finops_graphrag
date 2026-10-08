@@ -1,2 +1,25 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "access-control-lab"
+version = "0.1.0"
+description = "RBAC/ABAC/PBAC exploration project for FinOps"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.30.6",
+    "pydantic==2.9.2",
+    "python-jose[cryptography]==3.3.0",
+    "passlib==1.7.4",
+    "python-multipart==0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
