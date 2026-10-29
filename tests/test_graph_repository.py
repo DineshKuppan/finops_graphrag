@@ -61,3 +61,28 @@ def test_rag_context_includes_invoices():
     inv = Invoice(invoice_number="INV-9", vendor=Party(name="Acme", role="Vendor"), amount=42)
     repo = repo_with(invoice_doc("batch1", [inv]))
     assert "Invoice INV-9: 42.0 USD" in repo.fetch_subgraph_context("Subscription")
+
+
+def test_snapshot_projects_parties_contracts_and_invoices():
+    vendor = Party(name="Acme Inc", role="Vendor", tax_id="11-111", bank_account="ACC-1234")
+    inv = Invoice(
+        invoice_number="INV-1", vendor=Party(name="ACME, Inc.", role="Vendor"), bill_to=BUYER,
+        amount=500, issue_date="2026-03-01", contract_ref="c1", payment_method="Wire", remit_to_account="acc 1234",
+    )
+    snapshot = repo_with(contract("c1", [vendor, BUYER], terms=[term(1000)]), invoice_doc("batch1", [inv])).fetch_fraud_snapshot()
+
+    assert snapshot.parties["party_acme"].names == ["Acme Inc", "ACME, Inc."]
+    assert snapshot.parties["party_acme"].tax_ids == ["11111"]
+    c1 = snapshot.contracts["c1"]
+    assert c1.party_roles == {"party_acme": "Vendor", "party_finops": "Customer"}
+    assert c1.declared_accounts == {"party_acme": ["ACC1234"]}
+    assert (c1.term_values, c1.payment_methods) == ([1000.0], ["ACH"])
+    (record,) = snapshot.invoices
+    assert (record.vendor_id, record.bill_to_id, record.remit_to_account, record.source_doc_id) == (
+        "party_acme", "party_finops", "ACC1234", "batch1",
+    )
+
+
+def test_unresolved_contract_ref_is_not_a_contract_in_snapshot():
+    inv = Invoice(invoice_number="INV-1", vendor=Party(name="Acme", role="Vendor"), amount=1, contract_ref="ghost")
+    assert "ghost" not in repo_with(invoice_doc("batch1", [inv])).fetch_fraud_snapshot().contracts
