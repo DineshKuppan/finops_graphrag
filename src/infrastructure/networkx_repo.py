@@ -1,13 +1,15 @@
 import networkx as nx
-from typing import Literal
+from typing import List, Literal, Optional
 from src.interfaces.graph_storage import IGraphStorage
+from src.interfaces.fraud_graph_reader import IFraudGraphReader
 from src.domain import FinOpsContractGraph
 from src.domain.base import Party
 from src.domain.identity import canonical_party_key, canonical_identifier
+from src.domain.fraud import ContractRecord, FraudGraphSnapshot, InvoiceRecord, LeaseRecord, PartyRecord
 
 _IDENTIFIER_PREFIX = {"TaxId": "taxid", "BankAccount": "bank"}
 
-class NetworkXGraphRepository(IGraphStorage):
+class NetworkXGraphRepository(IGraphStorage, IFraudGraphReader):
     def __init__(self):
         self.graph = nx.MultiDiGraph()
 
@@ -128,3 +130,57 @@ class NetworkXGraphRepository(IGraphStorage):
                     context_strings.append(f"  - Invoice {attrs.get('invoice_number')}: {attrs.get('amount')} {attrs.get('currency')}")
                     
         return "\n".join(context_strings) if context_strings else "No active sub-graph data found matching filter."
+
+    def fetch_fraud_snapshot(self) -> FraudGraphSnapshot:
+        snapshot = FraudGraphSnapshot()
+        for node_id, data in self.graph.nodes(data=True):
+            t = data.get("type")
+            if t == "Party":
+                snapshot.parties[node_id] = PartyRecord(
+                    party_id=node_id, names=[data["name"], *sorted(data["aliases"] - {data["name"]})],
+                    tax_ids=self._linked_values(node_id, "IDENTIFIED_BY"),
+                    bank_accounts=self._linked_values(node_id, "PAID_TO"),
+                )
+            elif t == "Contract":
+                snapshot.contracts[node_id] = self._contract_record(node_id, data)
+            elif t == "Invoice":
+                snapshot.invoices.append(self._invoice_record(node_id, data))
+        return snapshot
+
+    def _linked_values(self, node_id: str, relation: str, declared_in: Optional[str] = None) -> List[str]:
+        return sorted({
+            self.graph.nodes[target]["value"]
+            for _, target, edge in self.graph.out_edges(node_id, data=True)
+            if edge.get("relation") == relation and declared_in in (None, edge.get("declared_in"))
+        })
+
+    def _contract_record(self, c_id: str, data: dict) -> ContractRecord:
+        record = ContractRecord(contract_id=c_id, title=data.get("title", ""), status=data.get("status", ""))
+        for _, target, edge in self.graph.out_edges(c_id, data=True):
+            relation, attrs = edge.get("relation"), self.graph.nodes[target]
+            if relation == "PARTY_TO":
+                record.party_roles[target] = edge.get("role", "")
+                accounts = self._linked_values(target, "PAID_TO", declared_in=c_id)
+                if accounts:
+                    record.declared_accounts[target] = accounts
+            elif relation == "HAS_FINANCIALS":
+                record.term_values.append(attrs["value"])
+                if attrs.get("payment_method"):
+                    record.payment_methods.append(attrs["payment_method"])
+            elif relation == "DEFINES_LEASE":
+                record.leases.append(LeaseRecord(
+                    start_date=attrs.get("start"), end_date=attrs.get("end"),
+                    floor=attrs.get("floor"), unit=attrs.get("unit"),
+                ))
+        return record
+
+    def _invoice_record(self, inv_id: str, data: dict) -> InvoiceRecord:
+        links = {edge["relation"]: target for _, target, edge in self.graph.out_edges(inv_id, data=True)}
+        remit_node = links.get("REMIT_TO")
+        return InvoiceRecord(
+            invoice_id=inv_id, invoice_number=data["invoice_number"], source_doc_id=data["source_doc"],
+            vendor_id=links["ISSUED_BY"], bill_to_id=links.get("BILLED_TO"),
+            amount=data["amount"], currency=data["currency"], issue_date=data.get("issue_date"),
+            contract_ref=data.get("contract_ref"), payment_method=data.get("payment_method"),
+            remit_to_account=self.graph.nodes[remit_node]["value"] if remit_node else None,
+        )
