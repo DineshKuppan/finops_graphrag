@@ -68,3 +68,13 @@ class FraudAssessment(BaseModel):
     signals: List[FraudSignal]
     reports: List[RiskReport]  # highest risk first
     explanation_prompt: str
+
+# --- Reviewer feedback (closes the loop on signal precision) ---
+
+class ReviewFeedback(BaseModel):
+    rule_id: str  # the signal's rule_id, e.g. "DUPLICATE_AMOUNT"
+    verdict: Literal["CONFIRMED", "DISMISSED"]
+    entity_ids: List[str] = Field(default_factory=list)
+    reviewer: Optional[str] = None
+    note: Optional[str] = None
+    recorded_at: str  # ISO-8601 timestamp

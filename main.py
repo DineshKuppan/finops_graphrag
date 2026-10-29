@@ -1,13 +1,19 @@
 # main.py
+import tempfile
+from pathlib import Path
+
 from src.domain import FinOpsContractGraph
 from src.domain.base import MetaContext, Party
 from src.domain.financials import FinancialTerm, PaymentSchedule
 from src.domain.invoices import Invoice
+from src.infrastructure.isolation_forest_detector import IsolationForestAnomalyDetector
+from src.infrastructure.jsonl_feedback_store import JsonlFeedbackStore
 from src.infrastructure.networkx_repo import NetworkXGraphRepository
 from src.use_cases.detect_fraud import DetectFraudSignalsUseCase
 from src.use_cases.fraud_rules import default_rules
 from src.use_cases.ingest_doc import IngestDocumentUseCase
 from src.use_cases.query_rag import QueryGraphRAGUseCase
+from src.use_cases.review_feedback import RecordReviewFeedbackUseCase
 
 # Real implementations are injected into placeholders here...
 class MockExtractor:
@@ -45,17 +51,21 @@ class MockExtractor:
     def extract_structured_data(self, text: str) -> FinOpsContractGraph:
         return self.documents["invoices" if "invoice" in text.lower() else "contract"]
 
-def main():
+def main(feedback_path: Path):
     print("🤖 Initializing FinOps GraphRAG Engine...")
 
     # 1. Initialize Adapters
     graph_storage = NetworkXGraphRepository()
     mock_extractor = MockExtractor() # Replace with your real OpenAI / Instructor Parser
+    feedback_store = JsonlFeedbackStore(feedback_path)
 
     # 2. Inject Adapters into Application Usecases
     ingest_pipeline = IngestDocumentUseCase(extractor=mock_extractor, storage=graph_storage)
     query_pipeline = QueryGraphRAGUseCase(storage=graph_storage)
-    fraud_pipeline = DetectFraudSignalsUseCase(reader=graph_storage, rules=default_rules())
+    # Vendor anomaly detection needs >= 8 invoicing vendors, so it stays silent on this small demo
+    fraud_rules = default_rules(anomaly_detector=IsolationForestAnomalyDetector())
+    fraud_pipeline = DetectFraudSignalsUseCase(reader=graph_storage, rules=fraud_rules, feedback=feedback_store)
+    review_pipeline = RecordReviewFeedbackUseCase(store=feedback_store)
 
     # 3. Execute Operations
     for raw_document in ("Vendor Service Contract for SaaS Platform Cloud Subscription...", "October vendor invoice batch..."):
@@ -71,5 +81,17 @@ def main():
         print(f"  {report.score:.2f}  {report.entity_type:<8} {report.entity_id}")
     print(f"\n🧾 Explanation Prompt:\n{assessment.explanation_prompt}")
 
+    # 4. Close the loop: a reviewer's verdict re-weights that rule on the next run
+    drift = next(s for s in assessment.signals if s.rule_id == "PAYMENT_METHOD_DRIFT")
+    review_pipeline.execute(drift, "DISMISSED", reviewer="ap-analyst", note="Wire approved by treasury")
+    reassessment = fraud_pipeline.execute()
+    print("\n🧑‍⚖️ Reviewer dismissed PAYMENT_METHOD_DRIFT:")
+    print(next(line for line in reassessment.explanation_prompt.splitlines() if "PAYMENT_METHOD_DRIFT" in line))
+    before = {r.entity_id: r.score for r in assessment.reports}
+    for report in reassessment.reports[:5]:
+        print(f"  {before[report.entity_id]:.3f} → {report.score:.3f}  {report.entity_type:<8} {report.entity_id}")
+
 if __name__ == "__main__":
-    main()
+    # Use a persistent path in production so reviewer verdicts accumulate across runs
+    with tempfile.TemporaryDirectory() as tmp:
+        main(Path(tmp) / "fraud_feedback.jsonl")
