@@ -10,6 +10,7 @@ class Party(BaseModel):
     name: str
     role: str
     tax_id: Optional[str] = None
+    bank_account: Optional[str] = None
 
 class Clause(BaseModel):
     type: str

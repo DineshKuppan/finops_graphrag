@@ -43,7 +43,9 @@ class LiteLLMInstructorExtractor(ILlmExtractor):
                     "role": "system",
                     "content": (
                         "You are a FinOps Graph extraction expert. Parse all metadata, penalties, "
-                        "lease components, and financial terms. Carefully segregate them into either "
+                        "lease components, financial terms, and invoices. Capture every party's tax ID "
+                        "and bank account, and each invoice's referenced contract ID, payment method "
+                        "and remit-to account exactly as written. Carefully segregate them into either "
                         "'REALTY' or 'Subscription' domains based on text essence."
                     )
                 },
