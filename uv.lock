@@ -910,7 +910,7 @@ proxy = [
 [package.metadata]
 requires-dist = [
     { name = "instructor", specifier = ">=1.0.0" },
-    { name = "networkx", specifier = ">=3.0" },
+    { name = "networkx", specifier = ">=3.1" },
     { name = "ollama", specifier = ">=0.6.2" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
