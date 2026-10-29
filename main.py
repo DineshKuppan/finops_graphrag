@@ -18,6 +18,7 @@ class MockExtractor:
             penalty_clauses = []
             lease_terms = []
             financial_terms = []
+            invoices = []
         return MockContract()
 
 def main():

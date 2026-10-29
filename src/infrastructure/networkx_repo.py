@@ -2,6 +2,10 @@ import networkx as nx
 from typing import Literal
 from src.interfaces.graph_storage import IGraphStorage
 from src.domain import FinOpsContractGraph
+from src.domain.base import Party
+from src.domain.identity import canonical_party_key, canonical_identifier
+
+_IDENTIFIER_PREFIX = {"TaxId": "taxid", "BankAccount": "bank"}
 
 class NetworkXGraphRepository(IGraphStorage):
     def __init__(self):
@@ -18,11 +22,10 @@ class NetworkXGraphRepository(IGraphStorage):
         self.graph.add_node(context_id, type="Context", domain=contract_data.context.domain, doc_type=contract_data.context.doc_type)
         self.graph.add_edge(c_id, context_id, relation="CATEGORIZED_AS")
 
-        # 3. Map Parties
+        # 3. Map Parties (entity-resolved, so name variants share one node)
         for p in contract_data.parties:
-            p_id = f"party_{p.name.replace(' ', '_').lower()}"
-            self.graph.add_node(p_id, type="Party", name=p.name, role=p.role)
-            self.graph.add_edge(c_id, p_id, relation="PARTY_TO")
+            p_id = self._upsert_party(p, declared_in=c_id)
+            self.graph.add_edge(c_id, p_id, relation="PARTY_TO", role=p.role)
 
         # 4. Map Penalties Track
         for idx, pc in enumerate(contract_data.penalty_clauses):
@@ -38,14 +41,63 @@ class NetworkXGraphRepository(IGraphStorage):
         # 5. Map Realty Lease Track
         for idx, lt in enumerate(contract_data.lease_terms):
             lt_id = f"lease_{c_id}_{idx}"
-            self.graph.add_node(lt_id, type="LeaseTerm", start=lt.start_date, end=lt.end_date, area=lt.area_sqft)
+            premises = lt.rent_schedule.premises if lt.rent_schedule else None
+            self.graph.add_node(
+                lt_id, type="LeaseTerm", start=lt.start_date, end=lt.end_date, area=lt.area_sqft,
+                floor=premises.floor if premises else None, unit=premises.unit if premises else None,
+            )
             self.graph.add_edge(c_id, lt_id, relation="DEFINES_LEASE")
 
         # 6. Map Financial Terms Track
         for idx, ft in enumerate(contract_data.financial_terms):
             ft_id = f"fin_term_{c_id}_{idx}"
-            self.graph.add_node(ft_id, type="FinancialTerm", name=ft.name, value=ft.value)
+            schedule = ft.payment_schedule
+            self.graph.add_node(
+                ft_id, type="FinancialTerm", name=ft.name, value=ft.value, currency=ft.currency,
+                frequency=schedule.frequency if schedule else None,
+                payment_method=schedule.method if schedule else None,
+            )
             self.graph.add_edge(c_id, ft_id, relation="HAS_FINANCIALS")
+
+        # 7. Map Invoices Track
+        for idx, inv in enumerate(contract_data.invoices):
+            inv_id = f"invoice_{c_id}_{idx}"
+            self.graph.add_node(
+                inv_id, type="Invoice", invoice_number=inv.invoice_number, amount=inv.amount,
+                currency=inv.currency, issue_date=inv.issue_date, payment_method=inv.payment_method,
+                contract_ref=inv.contract_ref, source_doc=c_id,
+            )
+            self.graph.add_edge(c_id, inv_id, relation="CONTAINS_INVOICE")
+            self.graph.add_edge(inv_id, self._upsert_party(inv.vendor, declared_in=c_id), relation="ISSUED_BY")
+            if inv.bill_to:
+                self.graph.add_edge(inv_id, self._upsert_party(inv.bill_to, declared_in=c_id), relation="BILLED_TO")
+            if inv.contract_ref:
+                # The contract may not be ingested yet; its node gets attributes once it is.
+                self.graph.add_edge(inv_id, inv.contract_ref, relation="BILLED_UNDER")
+            if inv.remit_to_account:
+                bank_id = self._upsert_identifier("BankAccount", inv.remit_to_account)
+                self.graph.add_edge(inv_id, bank_id, relation="REMIT_TO")
+
+    def _upsert_party(self, party: Party, declared_in: str) -> str:
+        p_id = f"party_{canonical_party_key(party.name)}"
+        if p_id not in self.graph:
+            self.graph.add_node(p_id, type="Party", name=party.name, role=party.role, aliases=set())
+        self.graph.nodes[p_id]["aliases"].add(party.name)
+
+        # declared_in records which document asserted the identifier (used for drift checks)
+        if party.tax_id:
+            tax_node = self._upsert_identifier("TaxId", party.tax_id)
+            self.graph.add_edge(p_id, tax_node, relation="IDENTIFIED_BY", declared_in=declared_in)
+        if party.bank_account:
+            bank_node = self._upsert_identifier("BankAccount", party.bank_account)
+            self.graph.add_edge(p_id, bank_node, relation="PAID_TO", declared_in=declared_in)
+        return p_id
+
+    def _upsert_identifier(self, kind: str, raw_value: str) -> str:
+        value = canonical_identifier(raw_value)
+        node_id = f"{_IDENTIFIER_PREFIX[kind]}_{value}"
+        self.graph.add_node(node_id, type=kind, value=value)
+        return node_id
 
     def fetch_subgraph_context(self, domain_filter: Literal["REALTY", "Subscription"]) -> str:
         context_strings = []
@@ -72,5 +124,7 @@ class NetworkXGraphRepository(IGraphStorage):
                     context_strings.append(f"  - Realty Lease Window: Area = {attrs.get('area')} sqft, Timeline = {attrs.get('start')} to {attrs.get('end')}")
                 elif t == "FinancialTerm":
                     context_strings.append(f"  - Metric: {attrs.get('name')} = {attrs.get('value')}")
+                elif t == "Invoice":
+                    context_strings.append(f"  - Invoice {attrs.get('invoice_number')}: {attrs.get('amount')} {attrs.get('currency')}")
                     
         return "\n".join(context_strings) if context_strings else "No active sub-graph data found matching filter."
