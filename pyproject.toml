@@ -25,3 +25,7 @@ proxy = [
 
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+# access-control-lab/ is a separate project with its own deps; run its tests from its own directory
+testpaths = ["tests"]
