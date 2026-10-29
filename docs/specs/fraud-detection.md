@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Phases 1–3 implemented · Phase 4 proposed |
+| **Status** | Phases 1–4 implemented |
 | **Author** | Dineshkumar Kuppan |
 | **Date** | 2026-10-29 |
 
@@ -33,7 +33,8 @@ The current ingestion also drops the data fraud detection needs:
 **Non-goals**
 - Deciding that something is fraud. The output is a review queue for a human.
 - Real-time or streaming detection. This runs as a batch over the graph.
-- Statistical/ML anomaly detection (proposed as Phase 4).
+- Supervised fraud classifiers. There is no labelled fraud history yet. Reviewer
+  feedback (§3.7) is the first step toward building one.
 
 ## 3. Design
 
@@ -103,6 +104,7 @@ class IFraudRule(ABC):
 | `REMITTANCE_ACCOUNT_DRIFT` | Invoice remit-to account differs from the account the contract declares for that vendor | HIGH | 3 |
 | `LEASE_OVERLAP` | Different contracts with the same landlord/lessor lease the same floor + unit for overlapping dates | HIGH | 3 |
 | `CIRCULAR_FLOW` | Payer→payee cycle of length 3–6 across invoices (round-tripping) | MEDIUM | 3 |
+| `VENDOR_ANOMALY` | Isolation-forest outlier among ≥8 invoicing vendors, with ≥1 feature ≥3 robust σ from the peer median (§3.6) | LOW/MEDIUM | 4 |
 
 Thresholds (window days, tolerance, cycle lengths) are constructor arguments.
 Bank accounts and tax IDs are **masked to their last 4 characters** in evidence text,
@@ -124,6 +126,55 @@ because that text is passed to an LLM and shown to reviewers.
    plausible legitimate explanations, and suggest verification steps, using only the
    facts listed and without calling anything confirmed fraud.
 
+### 3.6 Vendor anomaly detection (`src/use_cases/fraud_rules/anomaly.py`)
+
+The rules above only catch patterns someone has already thought of. `VendorAnomalyRule`
+catches vendors that simply *behave unlike their peers*. It is an ordinary `IFraudRule`,
+so it flows through the same scoring, prompt and feedback paths.
+
+**Features (one row per invoicing vendor).** Each feature has a plain-language meaning:
+invoices issued, total billed and mean amount (log-scaled), amount variation (CV), share of
+round-thousand amounts, invoices per 30 days, distinct remittance accounts, distinct payers,
+share of invoices without a known contract, and name variants.
+
+**Detector port.** `IAnomalyDetector.score(rows) -> [0..1]` is implemented by
+`IsolationForestAnomalyDetector` (scikit-learn, fixed `random_state` so results are
+reproducible). The use-case layer never imports scikit-learn. `default_rules(anomaly_detector=...)`
+enables the rule only when the composition root supplies a detector.
+
+**Two gates, so every flag is explainable.** A vendor is flagged only if:
+1. its isolation-forest score is ≥ 0.65 (MEDIUM if ≥ 0.75, otherwise LOW), **and**
+2. at least one feature sits ≥ 3 robust standard deviations (MAD-based) from the peer median.
+
+The evidence lists the top three deviating features in reviewer units, for example
+*"total billed 108,000 vs peer median 13,176; invoices issued 12 vs peer median 3"*.
+Gate 2 is needed because isolation-forest scores on small, uniform populations go as high as
+~0.64 with no real outlier present. With fewer than 8 invoicing vendors the rule stays
+silent rather than guess.
+
+**Why not Node2Vec, as originally proposed?** Embedding dimensions cannot be explained to a
+reviewer, which breaks the core rule that every signal carries concrete evidence. Node2Vec
+also adds gensim, its random walks give different results between runs, and it is unreliable
+on graphs this small. The relational structure it would capture (shared accounts, payer fan-out,
+uncontracted billing) is already covered by explicit features and rules. Embeddings can still
+be added later as another `IAnomalyDetector` input without changing the rule contract.
+
+### 3.7 Reviewer feedback loop (`src/use_cases/review_feedback.py`)
+
+- `RecordReviewFeedbackUseCase` stores a `ReviewFeedback` (rule, verdict
+  `CONFIRMED`/`DISMISSED`, entities, reviewer, note, UTC timestamp) through `IFeedbackStore`.
+  `JsonlFeedbackStore` is an append-only JSON Lines file, so verdict history is never rewritten.
+- When `DetectFraudSignalsUseCase` is given a store, each rule's weight becomes the Beta-posterior
+  mean of its precision. The severity weight is the prior, worth `k` (default 5) reviews:
+
+  `w = (k · w_severity + confirmed) / (k + confirmed + dismissed)`
+
+  Unreviewed rules keep their severity weight. A rule that keeps being dismissed fades toward 0,
+  and one that keeps being confirmed rises toward 1. Noisy-OR therefore reads as "probability at
+  least one signal on this entity is genuine".
+- Calibrated signals carry `[review history: c confirmed, d dismissed; weight w]` in the LLM
+  prompt, so the explanation can point out rules that tend to produce false positives.
+
 ## 4. Phases
 
 | Phase | Scope | Status |
@@ -131,7 +182,7 @@ because that text is passed to an LLM and shown to reviewers.
 | **1. Data foundation** | Domain additions, entity resolution, identifier/invoice nodes, extractor prompt | ✅ |
 | **2. Engine + core rules** | Snapshot port, `IFraudRule`, shared identifiers, duplicate billing, overbilling, use case + scoring + prompt | ✅ |
 | **3. Extended rules** | Orphan invoice, payment/remittance drift, lease overlap, circular flow, `main.py` demo | ✅ |
-| **4. Graph ML (proposed)** | Node2Vec embeddings + isolation forest for unusual vendors that no rule covers; reviewer feedback loop to tune weights | ⏳ |
+| **4. Anomaly detection + feedback** | Explainable behavioural features + isolation forest for unusual vendors (replaces the Node2Vec proposal, see §3.6); reviewer verdicts tune rule weights | ✅ |
 
 ## 5. Testing
 
@@ -140,8 +191,12 @@ because that text is passed to an LLM and shown to reviewers.
 - `tests/test_fraud_rules.py`: one positive and at least one negative case per rule, built
   from real `FinOpsContractGraph` documents ingested into the NetworkX repo.
 - `tests/test_detect_fraud.py`: scoring maths, ranking, prompt contents and masking.
+- `tests/test_vendor_anomaly.py`: feature values, robust deviation, a 20-vendor population where
+  only the rogue vendor is flagged (score 0.87 vs ≤ 0.55 for peers), and every gate.
+- `tests/test_review_feedback.py`: tallying, posterior weights, JSONL round-trip, and re-scoring
+  driven by feedback.
 
-Run with `uv run pytest tests`.
+Run with `uv run pytest`.
 
 ## 6. Known limitations
 
@@ -155,5 +210,10 @@ Run with `uv run pytest tests`.
   modelled.
 - **Status matching is a deny-list** (`terminated`, `expired`, …). Unknown statuses are
   treated as active to avoid false positives.
+- **Anomaly detection is unsupervised and judges vendors against each other.** If most vendors are
+  compromised, the bad behaviour becomes "normal". It also refits on every run, so a vendor's
+  score depends on who else is in the graph.
+- **Feedback is calibrated per rule, not per entity or per pattern.** Dismissing a legitimate
+  monthly retainer lowers `DUPLICATE_AMOUNT` everywhere. Per-entity allow-listing is a follow-up.
 - The snapshot loads the whole graph into memory. That is fine for NetworkX, but a Neo4j
   adapter should push rule patterns down into Cypher once volumes grow.

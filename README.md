@@ -39,7 +39,7 @@ The FinOps GraphRAG engine transforms unstructured financial documents into quer
 - 🤖 **LLM Integration**: LiteLLM/Instructor parser targeting local Llama models with schema-based extraction
 - 🏗️ **Clean Architecture**: Zero infrastructure coupling in business logic
 - 📐 **Semantic Graphs**: Structured relationships, not flat vector search
-- 🚨 **Fraud Signal Detection**: Explainable graph rules (shell vendors, duplicate billing, payment redirection, lease overlap, round-tripping) with per-entity risk scores — see [the spec](docs/specs/fraud-detection.md)
+- 🚨 **Fraud Signal Detection**: Explainable graph rules (shell vendors, duplicate billing, payment redirection, lease overlap, round-tripping) with per-entity risk scores, isolation-forest vendor anomaly detection, and reviewer feedback that re-weights rules — see [the spec](docs/specs/fraud-detection.md)
 
 ---
 
