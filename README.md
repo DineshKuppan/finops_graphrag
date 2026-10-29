@@ -39,6 +39,7 @@ The FinOps GraphRAG engine transforms unstructured financial documents into quer
 - 🤖 **LLM Integration**: LiteLLM/Instructor parser targeting local Llama models with schema-based extraction
 - 🏗️ **Clean Architecture**: Zero infrastructure coupling in business logic
 - 📐 **Semantic Graphs**: Structured relationships, not flat vector search
+- 🚨 **Fraud Signal Detection**: Explainable graph rules (shell vendors, duplicate billing, payment redirection, lease overlap, round-tripping) with per-entity risk scores — see [the spec](docs/specs/fraud-detection.md)
 
 ---
 
@@ -498,6 +499,30 @@ Then inject it into your use cases:
 storage = Neo4jGraphRepository(uri="bolt://localhost:7687", user="neo4j", password="...")
 ingest_pipeline = IngestDocumentUseCase(extractor=parser, storage=storage)
 ```
+
+### Adding a Fraud Rule
+
+Rules evaluate a storage-agnostic `FraudGraphSnapshot` and return `FraudSignal`s. Implement `IFraudRule`:
+
+```python
+# src/use_cases/fraud_rules/weekend.py
+from src.domain.fraud import FraudSignal
+from src.interfaces.fraud_rule import IFraudRule
+from src.use_cases.fraud_rules._util import parse_iso_date
+
+class WeekendInvoiceRule(IFraudRule):
+    def evaluate(self, snapshot):
+        return [
+            FraudSignal(rule_id="WEEKEND_INVOICE", severity="LOW", entity_ids=[inv.invoice_id],
+                        evidence=f"Invoice {inv.invoice_number} is dated on a weekend",
+                        source_doc_ids=[inv.source_doc_id])
+            for inv in snapshot.invoices
+            if (d := parse_iso_date(inv.issue_date)) and d.weekday() >= 5
+        ]
+```
+
+Register it in `default_rules()` (`src/use_cases/fraud_rules/__init__.py`), or pass your own list to
+`DetectFraudSignalsUseCase(reader=storage, rules=[...])`.
 
 ### Adding a New LLM Extractor
 
